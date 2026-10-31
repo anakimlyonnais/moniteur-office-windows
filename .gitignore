@@ -1,0 +1,12 @@
+# Ne jamais publier de secrets de signature ou de licence
+*.pem
+*.pfx
+*.p12
+*private*.xml
+*privee*.xml
+*secret*
+*.key
+*.env
+*.log
+*.bak
+*.tmp
