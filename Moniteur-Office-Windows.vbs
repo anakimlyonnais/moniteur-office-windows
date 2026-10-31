@@ -277,7 +277,8 @@ WScript.Quit 0
 '    } finally { $proc.Dispose() }
 '}
 'function Get-OfficeInfo {
-'    $res = [ordered]@{ Edition='Non detectee'; Version='Non disponible'; State='ABSENT'; Type='Non disponible'; Key='Non disponible'; Expiry='Non disponible'; Last='Non disponible'; Apps='Aucune suite Office'; Detail=''; Repairable=$false; OSPP='' }
+'    $functional=Get-ExcelTest
+'    $res = [ordered]@{ Edition='Non detectee'; Version='Non disponible'; State='ABSENT'; Type='Non disponible'; Key='Non disponible'; Expiry='Non disponible'; Last='Non disponible'; Apps='Aucune suite Office'; Detail=''; Repairable=$false; OSPP=''; FunctionalState=$functional.Status; FunctionalDate=$functional.Date }
 '    $c2r = $null
 '    try { $c2r = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction Stop } catch { }
 '    if ($c2r -and $c2r.ProductReleaseIds) { $res.Edition = [string]$c2r.ProductReleaseIds }
@@ -361,6 +362,9 @@ WScript.Quit 0
 '    return @(Get-Process -Name WINWORD,EXCEL,POWERPNT,OUTLOOK,ONENOTE,MSACCESS,MSPUB,MSPROJECT,VISIO -ErrorAction SilentlyContinue)
 '}
 'function Get-Advice($W, $O) {
+'    if ($O.State -notin @('ABSENT','PARTIEL') -and $O.FunctionalState -eq 'BLOQUE') {
+'        return [pscustomobject]@{ Action='OfficeSupport'; Message='Excel est signale BLOQUE. Une licence active ne prouve pas que le logiciel fonctionne. Preparer un rapport de support.'; Button='CONTACTER SUPPORT'; Alert=$true }
+'    }
 '    if ($W.State -eq 'INACTIVE') { return [pscustomobject]@{ Action='WindowsRepair'; Message='Windows semble desactive. Tenter la reactivation Microsoft avec la licence deja installee. Une confirmation et l''UAC seront demandes.'; Button='TENTER REACTIVATION WINDOWS'; Alert=$true } }
 '    if ($O.State -eq 'ABSENT' -or $O.State -eq 'PARTIEL') { return [pscustomobject]@{ Action='OfficeInstall'; Message='Suite Office absente ou incomplete. Ouvrir la page Microsoft pour installer l''edition associee a votre licence.'; Button='INSTALLER OFFICE (MICROSOFT)'; Alert=$true } }
 '    if ($O.State -eq 'INACTIVE' -and $O.Repairable -and $O.Type -match '(?i)VOLUME') { return [pscustomobject]@{ Action='OfficeRepair'; Message='Office a une licence en volume inactive. Fermer les applications Office, puis demander une reactivation officielle avec la cle deja installee.'; Button='TENTER REACTIVATION OFFICE'; Alert=$true } }
@@ -368,7 +372,10 @@ WScript.Quit 0
 '    if ($W.State -eq 'ATTENTION') { return [pscustomobject]@{ Action='WindowsRepair'; Message='Windows est en periode de grace. Verification et reactivation officielle conseillees avant la date indiquee.'; Button='TENTER REACTIVATION WINDOWS'; Alert=$true } }
 '    if ($O.State -eq 'INCONNU') { return [pscustomobject]@{ Action='OfficeAccount'; Message='Office est installe mais sa licence ne peut pas etre confirmee avec certitude. Verifiez dans Word > Fichier > Compte.'; Button='OUVRIR WORD / COMPTE'; Alert=$false } }
 '    if ($W.State -eq 'INCONNU') { return [pscustomobject]@{ Action='WindowsSettings'; Message='Etat de Windows non confirme. Examiner la page officielle des parametres d''activation.'; Button='PARAMETRES ACTIVATION WINDOWS'; Alert=$false } }
-'    return [pscustomobject]@{ Action='None'; Message='Windows et Office sont detectes comme actives. Aucun changement de licence necessaire.'; Button='AUCUNE ACTION NECESSAIRE'; Alert=$false }
+'    if ($O.State -eq 'ACTIVE' -and $O.FunctionalState -ne 'FONCTIONNE') {
+'        return [pscustomobject]@{ Action='OfficeTest'; Message='Activation Office detectee, mais Excel non teste. Ouvrir Excel et verifier si un bandeau rouge apparait.'; Button='TESTER EXCEL'; Alert=$false }
+'    }
+'    return [pscustomobject]@{ Action='None'; Message='Licences detectees actives; Excel confirme fonctionnel par un utilisateur durant les 7 derniers jours.'; Button='AUCUNE ACTION NECESSAIRE'; Alert=$false }
 '}
 'function Get-UpdateInfo {
 '    $info = [ordered]@{ Available=$false; Verified=$false; Version=$AppVersion; Notes=''; Url=''; Sha256=''; Status='Verification indisponible' }
@@ -675,6 +682,17 @@ WScript.Quit 0
 '     </Border>
 '    </StackPanel>
 '   </Border>
+'   <Border Background="#1B1D21" BorderBrush="#907542" BorderThickness="1" CornerRadius="7" Padding="15,11" Margin="0,0,0,12">
+'    <StackPanel>
+'     <TextBlock Text="&gt; TEST R&#201;EL D'EXCEL" FontFamily="Consolas" FontWeight="Bold" Foreground="#F2D396" FontSize="13"/>
+'     <TextBlock x:Name="ExcelTestStatus" Text="Fonctionnement non teste." TextWrapping="Wrap" Foreground="#CED9D7" Margin="0,6,0,8"/>
+'     <StackPanel Orientation="Horizontal">
+'      <Button x:Name="ExcelOpen" Content="OUVRIR EXCEL"/>
+'      <Button x:Name="ExcelGood" Content="EXCEL FONCTIONNE"/>
+'      <Button x:Name="ExcelBad" Content="EXCEL BLOQU&#201;" Background="#46242A" Foreground="#FFAAAA" BorderBrush="#7F4B4B"/>
+'     </StackPanel>
+'    </StackPanel>
+'   </Border>
 '   <Border Background="#131B22" BorderBrush="#315743" BorderThickness="1" CornerRadius="7" Padding="15,11" Margin="0,0,0,12">
 '    <StackPanel>
 '     <TextBlock Text="&gt; MISES A JOUR SIGNEES / CONFIRMATION REQUISE" Foreground="#CDEFE0" FontFamily="Consolas" FontWeight="Bold" FontSize="13" Margin="0,0,0,8"/>
@@ -715,7 +733,7 @@ WScript.Quit 0
 ''@
 '$reader = New-Object System.Xml.XmlNodeReader $xml
 '$window = [System.Windows.Markup.XamlReader]::Load($reader)
-'$names = @('TopStatus','TopTime','WinBadge','OfficeBadge','WinFields','OfficeFields','AdviceText','ActionButton','RefreshButton','ConfirmPanel','ConfirmText','YesButton','NoButton','LogBox','EnableMonitor','Weekly','Daily','MonitorLabel','SaveMonitor','UpdateStatus','UpdateButton','UpdateLater')
+'$names = @('TopStatus','TopTime','WinBadge','OfficeBadge','WinFields','OfficeFields','AdviceText','ActionButton','RefreshButton','ConfirmPanel','ConfirmText','YesButton','NoButton','LogBox','EnableMonitor','Weekly','Daily','MonitorLabel','SaveMonitor','UpdateStatus','UpdateButton','UpdateLater','ExcelTestStatus','ExcelOpen','ExcelGood','ExcelBad')
 '$ui = @{}
 'foreach ($n in $names) { $ui[$n] = $window.FindName($n) }
 '$script:ScanProc = $null
@@ -763,10 +781,12 @@ WScript.Quit 0
 '    $script:Report=$data
 '    $ui.WinFields.Children.Clear(); $ui.OfficeFields.Children.Clear()
 '    $w=$data.Windows; $o=$data.Office
-'    $ui.WinBadge.Text='[ ' + $w.State + ' ]'; $ui.OfficeBadge.Text='[ ' + $o.State + ' ]'
+'    $ui.WinBadge.Text='[ ' + $w.State + ' ]'
+'    $ui.OfficeBadge.Text=if ($o.FunctionalState -eq 'BLOQUE') {'[ EXCEL BLOQUE ]'} elseif ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE') {'[ LICENCE OK / EXCEL ? ]'} else {'[ '+$o.State+' ]'}
 '    $bc=New-Object System.Windows.Media.BrushConverter
 '    $ui.WinBadge.Foreground=$bc.ConvertFrom((Color-Of $w.State))
-'    $ui.OfficeBadge.Foreground=$bc.ConvertFrom((Color-Of $o.State))
+'    $colorState=if ($o.FunctionalState -eq 'BLOQUE') {'INACTIVE'} elseif ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE') {'INCONNU'} else {$o.State}
+'    $ui.OfficeBadge.Foreground=$bc.ConvertFrom((Color-Of $colorState))
 '    New-InfoRow $ui.WinFields 'Edition' $w.Edition
 '    New-InfoRow $ui.WinFields 'Version' $w.Build
 '    New-InfoRow $ui.WinFields 'Activation' $w.State
@@ -783,12 +803,15 @@ WScript.Quit 0
 '    New-InfoRow $ui.OfficeFields 'Expiration' $o.Expiry
 '    New-InfoRow $ui.OfficeFields 'Derniere activ.' $o.Last
 '    New-InfoRow $ui.OfficeFields 'Applications' $o.Apps
+'    New-InfoRow $ui.OfficeFields 'Fonctionnement' $o.FunctionalState
+'    New-InfoRow $ui.OfficeFields 'Dernier test' $o.FunctionalDate
+'    $ui.ExcelTestStatus.Text=if ($o.FunctionalState -eq 'BLOQUE') {'Excel BLOQUE malgre une licence affichee '+$o.State} elseif ($o.FunctionalState -eq 'FONCTIONNE') {'Excel confirme fonctionnel : '+$o.FunctionalDate} else {'Excel non verifie. Tester une feuille puis signaler le resultat.'}
 '    $script:AdviceAction = [string]$data.Advice.Action
 '    $ui.AdviceText.Text = [string]$data.Advice.Message
 '    $ui.ActionButton.Content = [string]$data.Advice.Button
 '    $ui.ActionButton.IsEnabled = ($script:AdviceAction -ne 'None')
-'    $ui.TopStatus.Text=if ($data.Advice.Alert) {'[ INTERVENTION CONSEILLEE ]'} else {'[ CONTROLE TERMINE ]'}
-'    $statusColor = if ($data.Advice.Alert) { '#F5C879' } else { '#8DF3AD' }
+'    $ui.TopStatus.Text=if ($data.Advice.Alert) {'[ INTERVENTION CONSEILLEE ]'} elseif ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE') {'[ EXCEL A VERIFIER ]'} else {'[ CONTROLE TERMINE ]'}
+'    $statusColor = if ($data.Advice.Alert -or ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE')) { '#F5C879' } else { '#8DF3AD' }
 '    $ui.TopStatus.Foreground=$bc.ConvertFrom($statusColor)
 '    try { $ui.TopTime.Text='Dernier controle : '+([datetime]$data.Timestamp).ToString('dd/MM/yyyy HH:mm:ss') } catch { }
 '    $script:UpdateData = $data.Update
@@ -829,6 +852,25 @@ WScript.Quit 0
 '    if ($ui.ConfirmPanel.Visibility -ne 'Visible') { return }
 '    if ($e.Key -eq [System.Windows.Input.Key]::D1 -or $e.Key -eq [System.Windows.Input.Key]::NumPad1) { Confirm-Yes; $e.Handled=$true }
 '    elseif ($e.Key -eq [System.Windows.Input.Key]::D0 -or $e.Key -eq [System.Windows.Input.Key]::NumPad0) { Confirm-No; $e.Handled=$true }
+'})
+'function Open-ExcelForTest {
+'    $exe=@(Office-Roots) | ForEach-Object { Join-Path $_ 'EXCEL.EXE' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+'    if (-not $exe) { ULog '[ERREUR] Excel introuvable'; return }
+'    try { Start-Process -FilePath $exe; ULog '[TEST] Ouvrir et modifier une feuille, puis choisir FONCTIONNE ou BLOQUE.' }
+'    catch { ULog ('[ERREUR] Excel : '+$_.Exception.Message) }
+'}
+'$ui.ExcelOpen.Add_Click({ Open-ExcelForTest })
+'$ui.ExcelGood.Add_Click({
+'    Ask-InWindow 'Avez-vous ouvert Excel et pu modifier une feuille sans erreur de licence ? Confirmation valable 7 jours.' {
+'        Set-ExcelTest 'FONCTIONNE'
+'        Start-Scan
+'    }
+'})
+'$ui.ExcelBad.Add_Click({
+'    Ask-InWindow 'Confirmez-vous un blocage ou message rouge dans Excel ? Le signalement restera affiche meme si la licence est active.' {
+'        Set-ExcelTest 'BLOQUE'
+'        Start-Scan
+'    }
 '})
 'function Refresh-MonitorLabel {
 '    $m=Get-Monitor
@@ -1012,6 +1054,8 @@ WScript.Quit 0
 '                Start-Process 'https://www.microsoft.com/microsoft-365/download-office'
 '            }
 '        }
+'        'OfficeSupport' { ULog '[SUPPORT] Utilisez le panneau Support pour preparer les logs.' }
+'        'OfficeTest' { Open-ExcelForTest }
 '        'OfficeAccount' {
 '            Ask-InWindow 'Ouvrir Word pour verifier Fichier > Compte et reconnecter un compte Microsoft autorise ?' {
 '                $loc=@(Office-Roots) | ForEach-Object { Join-Path $_ 'WINWORD.EXE' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
