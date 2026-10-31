@@ -1,6 +1,6 @@
 Option Explicit
-' MONITEUR OFFICE + WINDOWS V4 - un seul fichier a deposer sur le Bureau.
-' VERSION_APP: 4.0.0
+' MONITEUR OFFICE + WINDOWS V4.1 - un seul fichier a deposer sur le Bureau.
+' VERSION_APP: 4.1.0
 ' Lancement manuel : 1 seule fenetre WPF, analyse immediate et journal visible.
 ' Surveillance : tache planifiee sans elevation et sans console CMD/PowerShell.
 ' Remediation : uniquement apres accord explicite, avec UAC si necessaire.
@@ -149,7 +149,11 @@ WScript.Quit 0
 '$RepairResult = Join-Path $Root 'repair-result-v3.json'
 '$History = Join-Path $Root 'journal-v3.txt'
 '$PSExe = Join-Path $PSHOME 'powershell.exe'
-'$AppVersion = '4.0.0'
+'$AppVersion = '4.1.0'
+'$InstallationIdPath = Join-Path $Root 'installation-id.txt'
+'$ExcelTestFile = Join-Path $Root 'excel-test.json'
+'$MetricsPath = Join-Path $Root 'local-metrics'
+'$SupportPhone = '14507581093'
 '$UpdateFeed = 'https://raw.githubusercontent.com/anakimlyonnais/moniteur-office-windows/main/updates/latest.json'
 '$PublisherModulus = 'xS1lG4l6U3dONy9r1keZf3gKER7L/NzNf9SZue+gcPWl/9V9VxAf1uzdSXb40lTRZK7ZCuZa53M+7EkgZuJOsdASyaCrAqrReWgBGbaZF7WrdF+Q4ynbHO/ne+3O43PSrNumt0OXd/3ZGqw7jKUwtMdmT+Dxd2zaAFsqcGFUo9eGAAAeB6Kwk/BWSVgpr2JT2rmXdpzvtobTK2GgPFfh787enxvKmTKyV8v0Nk0dxYNzi3pp/dJ2WcdnBGLi/yeNsmTczrBiO+J/jTY6zE1dWQ++fU6krdju1JJoN90sZJLySG+mF0PYJuMrvxBcTBZYMTkL2EGp1ElNPm3p2KL9+KQbIdegQUEycJLX3QiLgb+AazflwatKYQPgJUlGzFhwyjGriWn8HtEXghGASwASGIF/k9m2Y0eomRKCAqxUQJgvHlepY1Y4RY84SuT2NQge33+I6KVqwNYO19tVsaeleFHvKT9qNjI2Ig9Pz+x9wVUTJo8xsxyctqHOu797kvjZ'
 '$PublisherExponent = 'AQAB'
@@ -177,6 +181,127 @@ WScript.Quit 0
 '    } finally {
 '        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
 '    }
+'}
+'function Get-InstallationId {
+'    try {
+'        if (Test-Path -LiteralPath $InstallationIdPath) {
+'            $id=(Get-Content -LiteralPath $InstallationIdPath -Raw -ErrorAction Stop).Trim()
+'            if ($id -match '^MON-[0-9A-F]{12}$') { return $id }
+'        }
+'    } catch { }
+'    $id='MON-'+[guid]::NewGuid().ToString('N').Substring(0,12).ToUpperInvariant()
+'    Set-Content -LiteralPath $InstallationIdPath -Encoding ASCII -Value $id
+'    return $id
+'}
+'function Get-ExcelTest {
+'    $r=[pscustomobject]@{Status='NON_VERIFIE';Date='Non disponible'}
+'    $saved=Read-Json $ExcelTestFile
+'    if (-not $saved -or $saved.Status -notin @('BLOQUE','FONCTIONNE')) { return $r }
+'    try {
+'        $date=[datetime]$saved.Timestamp
+'        $r.Date=$date.ToString('dd/MM/yyyy HH:mm')
+'        if ($saved.Status -eq 'FONCTIONNE' -and ((Get-Date)-$date).TotalDays -gt 7) { return $r }
+'        $r.Status=[string]$saved.Status
+'    } catch { }
+'    return $r
+'}
+'function Set-ExcelTest([string]$Status) {
+'    if ($Status -notin @('BLOQUE','FONCTIONNE')) { throw 'Etat invalide' }
+'    Save-Json $ExcelTestFile ([pscustomobject]@{Status=$Status;Timestamp=(Get-Date).ToString('o')})
+'    if ($Status -eq 'BLOQUE') { Record-LocalEvent 'excel_bloque' }
+'    Add-History ('Test Excel par utilisateur: '+$Status)
+'}
+'function Record-LocalEvent([string]$Event) {
+'    if ($Event -notin @('scan','excel_bloque','rapport_support')) { return }
+'    try {
+'        if (-not (Test-Path -LiteralPath $MetricsPath)) { [void](New-Item -ItemType Directory -Path $MetricsPath -Force) }
+'        $p=Join-Path $MetricsPath ([guid]::NewGuid().ToString('N')+'.json')
+'        [pscustomobject]@{Event=$Event;Version=$AppVersion;Timestamp=(Get-Date).ToUniversalTime().ToString('o')} |
+'            ConvertTo-Json -Compress | Set-Content -LiteralPath $p -Encoding UTF8
+'    } catch { }
+'}
+'function Get-LocalCounts {
+'    $c=@{scan=0;excel_bloque=0;rapport_support=0}
+'    try {
+'        Get-ChildItem -LiteralPath $MetricsPath -Filter '*.json' -File -ErrorAction Stop | ForEach-Object {
+'            try {
+'                $o=Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+'                if ($c.ContainsKey([string]$o.Event)) { $c[[string]$o.Event]++ }
+'            } catch { }
+'        }
+'    } catch { }
+'    return [pscustomobject]@{Scans=$c.scan;Blocks=$c.excel_bloque;Support=$c.rapport_support}
+'}
+'function Redact-Log([string]$Text) {
+'    $t=[string]$Text
+'    if ($env:USERNAME) { $t=$t.Replace($env:USERNAME,'[utilisateur]') }
+'    $t=[regex]::Replace($t,'(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}','[courriel masque]')
+'    $t=[regex]::Replace($t,'(?i)[A-Z0-9]{5}(?:-[A-Z0-9]{5}){4}','[cle masquee]')
+'    return $t
+'}
+'function Export-SupportReport([string]$Issue,[string]$Caller) {
+'    $r=Read-Json $LastReport
+'    if (-not $r) { throw 'Diagnostic manquant. Utilisez REFAIRE LE CONTROLE.' }
+'    $id=Get-InstallationId
+'    $desktop=[Environment]::GetFolderPath('DesktopDirectory')
+'    if (-not $desktop -or -not (Test-Path -LiteralPath $desktop)) { $desktop=$Root }
+'    $stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
+'    $zip=Join-Path $desktop ('Rapport-'+$id+'-'+$stamp+'.zip')
+'    $temp=Join-Path $Root ('rapport-'+[guid]::NewGuid().ToString('N'))
+'    [void](New-Item -Path $temp -ItemType Directory -Force)
+'    try {
+'        $issue=Redact-Log $Issue
+'        if ($issue.Length -gt 320) { $issue=$issue.Substring(0,320) }
+'        $caller=[regex]::Replace($Caller,'[^0-9+]','')
+'        if ($caller.Length -gt 20) { $caller='' }
+'        # Data minimization: no full license keys, tenant IDs, raw Office command output, or filenames.
+'        [pscustomobject]@{
+'            Schema='support-v1';Id=$id;Created=(Get-Date).ToString('o');Version=$AppVersion
+'            Windows=[pscustomobject]@{ Edition=$r.Windows.Edition;Build=$r.Windows.Build;LicenseState=$r.Windows.State;Channel=$r.Windows.Channel;PartialKey=$r.Windows.Key;ErrorCode=$r.Windows.Reason }
+'            Office=[pscustomobject]@{ Edition=$r.Office.Edition;Version=$r.Office.Version;LicenseState=$r.Office.State;LicenseType=$r.Office.Type;PartialKey=$r.Office.Key;Functionality=$r.Office.FunctionalState;LastTest=$r.Office.FunctionalDate }
+'            UserReport=$issue;CallbackWhatsApp=$caller
+'        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $temp 'diagnostic.json') -Encoding UTF8
+'        if (Test-Path -LiteralPath $History) {
+'            @(Get-Content -LiteralPath $History -Tail 120 -ErrorAction SilentlyContinue | ForEach-Object { Redact-Log ([string]$_) }) |
+'                Set-Content -LiteralPath (Join-Path $temp 'historique-expurge.txt') -Encoding UTF8
+'        }
+'        $events=@()
+'        try {
+'            $items=Get-WinEvent -FilterHashtable @{LogName='Application';StartTime=(Get-Date).AddDays(-7);Level=2} -MaxEvents 150 -ErrorAction Stop
+'            foreach ($e in $items) {
+'                if ($e.ProviderName -match '(?i)Office|ClickToRun|Application Error' -or $e.Message -match '(?i)EXCEL\.EXE|WINWORD\.EXE') {
+'                    $events += [pscustomobject]@{When=$e.TimeCreated.ToString('o');Provider=$e.ProviderName;Id=$e.Id}
+'                }
+'            }
+'        } catch { }
+'        $events | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $temp 'evenements-office.json') -Encoding UTF8
+'        $blocks=@()
+'        try {
+'            $ci=Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-CodeIntegrity/Operational';Id=3076,3077;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 50 -ErrorAction Stop
+'            $blocks=@($ci | ForEach-Object { [pscustomobject]@{When=$_.TimeCreated.ToString('o');Id=$_.Id} })
+'        } catch { }
+'        $blocks | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $temp 'smart-app-control.json') -Encoding UTF8
+'        @('Rapport local pour support. Aucun televersement ni envoi automatique.', 'Verifier les fichiers avant de joindre ce ZIP a WhatsApp.', 'Ne jamais partager un mot de passe ni une cle de licence complete.') |
+'            Set-Content -LiteralPath (Join-Path $temp 'A-LIRE.txt') -Encoding UTF8
+'        Compress-Archive -Path (Join-Path $temp '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+'        Record-LocalEvent 'rapport_support'
+'        return [pscustomobject]@{Zip=$zip;Id=$id;Caller=$caller}
+'    } finally {
+'        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+'    }
+'}
+'function Open-SupportChat($Report) {
+'    $message=@(
+'        'Support Moniteur Office + Windows',
+'        'ID : '+$Report.Id,
+'        'Version : '+$AppVersion,
+'        'Rapport ZIP prepare : '+[IO.Path]::GetFileName($Report.Zip),
+'        'Je joins le document manuellement.'
+'    ) -join [Environment]::NewLine
+'    if ($Report.Caller) { $message += [Environment]::NewLine + 'Mon WhatsApp pour rappel : ' + $Report.Caller }
+'    $url='https://wa.me/'+$SupportPhone+'?text='+[uri]::EscapeDataString($message)
+'    Start-Process -FilePath $url
+'    Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $Report.Zip)
 '}
 'function Get-Status([int]$Code) {
 '    switch ($Code) { 1 {'ACTIVE'} 0 {'INACTIVE'} 5 {'INACTIVE'} 2 {'ATTENTION'} 3 {'ATTENTION'} 4 {'ATTENTION'} 6 {'ATTENTION'} default {'INCONNU'} }
@@ -245,7 +370,8 @@ WScript.Quit 0
 '    } finally { $proc.Dispose() }
 '}
 'function Get-OfficeInfo {
-'    $res = [ordered]@{ Edition='Non detectee'; Version='Non disponible'; State='ABSENT'; Type='Non disponible'; Key='Non disponible'; Expiry='Non disponible'; Last='Non disponible'; Apps='Aucune suite Office'; Detail=''; Repairable=$false; OSPP='' }
+'    $functional=Get-ExcelTest
+'    $res = [ordered]@{ Edition='Non detectee'; Version='Non disponible'; State='ABSENT'; Type='Non disponible'; Key='Non disponible'; Expiry='Non disponible'; Last='Non disponible'; Apps='Aucune suite Office'; Detail=''; Repairable=$false; OSPP=''; FunctionalState=$functional.Status; FunctionalDate=$functional.Date }
 '    $c2r = $null
 '    try { $c2r = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction Stop } catch { }
 '    if ($c2r -and $c2r.ProductReleaseIds) { $res.Edition = [string]$c2r.ProductReleaseIds }
@@ -329,6 +455,9 @@ WScript.Quit 0
 '    return @(Get-Process -Name WINWORD,EXCEL,POWERPNT,OUTLOOK,ONENOTE,MSACCESS,MSPUB,MSPROJECT,VISIO -ErrorAction SilentlyContinue)
 '}
 'function Get-Advice($W, $O) {
+'    if ($O.State -notin @('ABSENT','PARTIEL') -and $O.FunctionalState -eq 'BLOQUE') {
+'        return [pscustomobject]@{ Action='OfficeSupport'; Message='Excel est signale BLOQUE. Une licence active ne prouve pas que le logiciel fonctionne. Preparer un rapport de support.'; Button='CONTACTER SUPPORT'; Alert=$true }
+'    }
 '    if ($W.State -eq 'INACTIVE') { return [pscustomobject]@{ Action='WindowsRepair'; Message='Windows semble desactive. Tenter la reactivation Microsoft avec la licence deja installee. Une confirmation et l''UAC seront demandes.'; Button='TENTER REACTIVATION WINDOWS'; Alert=$true } }
 '    if ($O.State -eq 'ABSENT' -or $O.State -eq 'PARTIEL') { return [pscustomobject]@{ Action='OfficeInstall'; Message='Suite Office absente ou incomplete. Ouvrir la page Microsoft pour installer l''edition associee a votre licence.'; Button='INSTALLER OFFICE (MICROSOFT)'; Alert=$true } }
 '    if ($O.State -eq 'INACTIVE' -and $O.Repairable -and $O.Type -match '(?i)VOLUME') { return [pscustomobject]@{ Action='OfficeRepair'; Message='Office a une licence en volume inactive. Fermer les applications Office, puis demander une reactivation officielle avec la cle deja installee.'; Button='TENTER REACTIVATION OFFICE'; Alert=$true } }
@@ -336,7 +465,10 @@ WScript.Quit 0
 '    if ($W.State -eq 'ATTENTION') { return [pscustomobject]@{ Action='WindowsRepair'; Message='Windows est en periode de grace. Verification et reactivation officielle conseillees avant la date indiquee.'; Button='TENTER REACTIVATION WINDOWS'; Alert=$true } }
 '    if ($O.State -eq 'INCONNU') { return [pscustomobject]@{ Action='OfficeAccount'; Message='Office est installe mais sa licence ne peut pas etre confirmee avec certitude. Verifiez dans Word > Fichier > Compte.'; Button='OUVRIR WORD / COMPTE'; Alert=$false } }
 '    if ($W.State -eq 'INCONNU') { return [pscustomobject]@{ Action='WindowsSettings'; Message='Etat de Windows non confirme. Examiner la page officielle des parametres d''activation.'; Button='PARAMETRES ACTIVATION WINDOWS'; Alert=$false } }
-'    return [pscustomobject]@{ Action='None'; Message='Windows et Office sont detectes comme actives. Aucun changement de licence necessaire.'; Button='AUCUNE ACTION NECESSAIRE'; Alert=$false }
+'    if ($O.State -eq 'ACTIVE' -and $O.FunctionalState -ne 'FONCTIONNE') {
+'        return [pscustomobject]@{ Action='OfficeTest'; Message='Activation Office detectee, mais Excel non teste. Ouvrir Excel et verifier si un bandeau rouge apparait.'; Button='TESTER EXCEL'; Alert=$false }
+'    }
+'    return [pscustomobject]@{ Action='None'; Message='Licences detectees actives; Excel confirme fonctionnel par un utilisateur durant les 7 derniers jours.'; Button='AUCUNE ACTION NECESSAIRE'; Alert=$false }
 '}
 'function Get-UpdateInfo {
 '    $info = [ordered]@{ Available=$false; Verified=$false; Version=$AppVersion; Notes=''; Url=''; Sha256=''; Status='Verification indisponible' }
@@ -436,6 +568,7 @@ WScript.Quit 0
 '    $result = [pscustomobject]@{ Timestamp=(Get-Date).ToString('o'); Windows=$w; Office=$o; OpenOffice=$open; Advice=$advice; Update=$update }
 '    if ($ReportFile) { Save-Json $ReportFile $result }
 '    Save-Json $LastReport $result
+'    Record-LocalEvent 'scan'
 '    Add-History ('Controle : Windows={0} Office={1} Action={2}' -f $w.State, $o.State, $advice.Action)
 '    Step 'Diagnostic termine. Aucune modification de licence effectuee.'
 '    return $result
@@ -643,6 +776,31 @@ WScript.Quit 0
 '     </Border>
 '    </StackPanel>
 '   </Border>
+'   <Border Background="#1B1D21" BorderBrush="#907542" BorderThickness="1" CornerRadius="7" Padding="15,11" Margin="0,0,0,12">
+'    <StackPanel>
+'     <TextBlock Text="&gt; TEST R&#201;EL D'EXCEL" FontFamily="Consolas" FontWeight="Bold" Foreground="#F2D396" FontSize="13"/>
+'     <TextBlock x:Name="ExcelTestStatus" Text="Fonctionnement non teste." TextWrapping="Wrap" Foreground="#CED9D7" Margin="0,6,0,8"/>
+'     <StackPanel Orientation="Horizontal">
+'      <Button x:Name="ExcelOpen" Content="OUVRIR EXCEL"/>
+'      <Button x:Name="ExcelGood" Content="EXCEL FONCTIONNE"/>
+'      <Button x:Name="ExcelBad" Content="EXCEL BLOQU&#201;" Background="#46242A" Foreground="#FFAAAA" BorderBrush="#7F4B4B"/>
+'     </StackPanel>
+'    </StackPanel>
+'   </Border>
+'   <Border Background="#121C22" BorderBrush="#3B6474" BorderThickness="1" CornerRadius="7" Padding="15,11" Margin="0,0,0,12">
+'    <StackPanel>
+'     <TextBlock Text="&gt; SUPPORT WHATSAPP / RAPPORT D'ANALYSE" FontFamily="Consolas" FontWeight="Bold" Foreground="#C9E9F5" FontSize="13"/>
+'     <TextBlock x:Name="InstallationIdLabel" Text="Identifiant du poste..." Foreground="#9FC6D0" FontSize="12" Margin="0,7,0,8"/>
+'     <TextBlock Text="Votre numero WhatsApp pour rappel (facultatif)" Foreground="#CED9E0" FontSize="12"/>
+'     <TextBox x:Name="CallbackPhone" MaxLength="20" Height="29" Margin="0,3,0,7" Background="#0B1015" Foreground="#EDF5F5" BorderBrush="#456573" Padding="7,4"/>
+'     <TextBlock Text="Description du probleme (facultative; aucune donnee personnelle)" Foreground="#CED9E0" FontSize="12"/>
+'     <TextBox x:Name="IssueDescription" MaxLength="320" Height="46" AcceptsReturn="True" TextWrapping="Wrap" Margin="0,3,0,8" Background="#0B1015" Foreground="#EDF5F5" BorderBrush="#456573" Padding="7,4"/>
+'     <CheckBox x:Name="ShareConsent" Content="Je consens a preparer un ZIP pour le partager moi-meme dans WhatsApp." Margin="0,0,0,8"/>
+'     <Button x:Name="SupportButton" Content="PR&#201;PARER RAPPORT ET OUVRIR WHATSAPP" HorizontalAlignment="Left"/>
+'     <TextBlock x:Name="SupportFeedback" Text="Le ZIP n'est pas joint ou envoye automatiquement; choisissez Joindre dans WhatsApp." Foreground="#98BACA" TextWrapping="Wrap" FontSize="12" Margin="0,8,0,4"/>
+'     <TextBlock x:Name="LocalMetrics" Text="Statistiques locales uniquement; aucune telemetrie automatique." Foreground="#83B4B8" FontSize="12" Margin="0,4,0,0"/>
+'    </StackPanel>
+'   </Border>
 '   <Border Background="#131B22" BorderBrush="#315743" BorderThickness="1" CornerRadius="7" Padding="15,11" Margin="0,0,0,12">
 '    <StackPanel>
 '     <TextBlock Text="&gt; MISES A JOUR SIGNEES / CONFIRMATION REQUISE" Foreground="#CDEFE0" FontFamily="Consolas" FontWeight="Bold" FontSize="13" Margin="0,0,0,8"/>
@@ -683,7 +841,7 @@ WScript.Quit 0
 ''@
 '$reader = New-Object System.Xml.XmlNodeReader $xml
 '$window = [System.Windows.Markup.XamlReader]::Load($reader)
-'$names = @('TopStatus','TopTime','WinBadge','OfficeBadge','WinFields','OfficeFields','AdviceText','ActionButton','RefreshButton','ConfirmPanel','ConfirmText','YesButton','NoButton','LogBox','EnableMonitor','Weekly','Daily','MonitorLabel','SaveMonitor','UpdateStatus','UpdateButton','UpdateLater')
+'$names = @('TopStatus','TopTime','WinBadge','OfficeBadge','WinFields','OfficeFields','AdviceText','ActionButton','RefreshButton','ConfirmPanel','ConfirmText','YesButton','NoButton','LogBox','EnableMonitor','Weekly','Daily','MonitorLabel','SaveMonitor','UpdateStatus','UpdateButton','UpdateLater','ExcelTestStatus','ExcelOpen','ExcelGood','ExcelBad','InstallationIdLabel','CallbackPhone','IssueDescription','ShareConsent','SupportButton','SupportFeedback','LocalMetrics')
 '$ui = @{}
 'foreach ($n in $names) { $ui[$n] = $window.FindName($n) }
 '$script:ScanProc = $null
@@ -731,10 +889,12 @@ WScript.Quit 0
 '    $script:Report=$data
 '    $ui.WinFields.Children.Clear(); $ui.OfficeFields.Children.Clear()
 '    $w=$data.Windows; $o=$data.Office
-'    $ui.WinBadge.Text='[ ' + $w.State + ' ]'; $ui.OfficeBadge.Text='[ ' + $o.State + ' ]'
+'    $ui.WinBadge.Text='[ ' + $w.State + ' ]'
+'    $ui.OfficeBadge.Text=if ($o.FunctionalState -eq 'BLOQUE') {'[ EXCEL BLOQUE ]'} elseif ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE') {'[ LICENCE OK / EXCEL ? ]'} else {'[ '+$o.State+' ]'}
 '    $bc=New-Object System.Windows.Media.BrushConverter
 '    $ui.WinBadge.Foreground=$bc.ConvertFrom((Color-Of $w.State))
-'    $ui.OfficeBadge.Foreground=$bc.ConvertFrom((Color-Of $o.State))
+'    $colorState=if ($o.FunctionalState -eq 'BLOQUE') {'INACTIVE'} elseif ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE') {'INCONNU'} else {$o.State}
+'    $ui.OfficeBadge.Foreground=$bc.ConvertFrom((Color-Of $colorState))
 '    New-InfoRow $ui.WinFields 'Edition' $w.Edition
 '    New-InfoRow $ui.WinFields 'Version' $w.Build
 '    New-InfoRow $ui.WinFields 'Activation' $w.State
@@ -751,12 +911,15 @@ WScript.Quit 0
 '    New-InfoRow $ui.OfficeFields 'Expiration' $o.Expiry
 '    New-InfoRow $ui.OfficeFields 'Derniere activ.' $o.Last
 '    New-InfoRow $ui.OfficeFields 'Applications' $o.Apps
+'    New-InfoRow $ui.OfficeFields 'Fonctionnement' $o.FunctionalState
+'    New-InfoRow $ui.OfficeFields 'Dernier test' $o.FunctionalDate
+'    $ui.ExcelTestStatus.Text=if ($o.FunctionalState -eq 'BLOQUE') {'Excel BLOQUE malgre une licence affichee '+$o.State} elseif ($o.FunctionalState -eq 'FONCTIONNE') {'Excel confirme fonctionnel : '+$o.FunctionalDate} else {'Excel non verifie. Tester une feuille puis signaler le resultat.'}
 '    $script:AdviceAction = [string]$data.Advice.Action
 '    $ui.AdviceText.Text = [string]$data.Advice.Message
 '    $ui.ActionButton.Content = [string]$data.Advice.Button
 '    $ui.ActionButton.IsEnabled = ($script:AdviceAction -ne 'None')
-'    $ui.TopStatus.Text=if ($data.Advice.Alert) {'[ INTERVENTION CONSEILLEE ]'} else {'[ CONTROLE TERMINE ]'}
-'    $statusColor = if ($data.Advice.Alert) { '#F5C879' } else { '#8DF3AD' }
+'    $ui.TopStatus.Text=if ($data.Advice.Alert) {'[ INTERVENTION CONSEILLEE ]'} elseif ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE') {'[ EXCEL A VERIFIER ]'} else {'[ CONTROLE TERMINE ]'}
+'    $statusColor = if ($data.Advice.Alert -or ($o.State -eq 'ACTIVE' -and $o.FunctionalState -ne 'FONCTIONNE')) { '#F5C879' } else { '#8DF3AD' }
 '    $ui.TopStatus.Foreground=$bc.ConvertFrom($statusColor)
 '    try { $ui.TopTime.Text='Dernier controle : '+([datetime]$data.Timestamp).ToString('dd/MM/yyyy HH:mm:ss') } catch { }
 '    $script:UpdateData = $data.Update
@@ -797,6 +960,46 @@ WScript.Quit 0
 '    if ($ui.ConfirmPanel.Visibility -ne 'Visible') { return }
 '    if ($e.Key -eq [System.Windows.Input.Key]::D1 -or $e.Key -eq [System.Windows.Input.Key]::NumPad1) { Confirm-Yes; $e.Handled=$true }
 '    elseif ($e.Key -eq [System.Windows.Input.Key]::D0 -or $e.Key -eq [System.Windows.Input.Key]::NumPad0) { Confirm-No; $e.Handled=$true }
+'})
+'function Open-ExcelForTest {
+'    $exe=@(Office-Roots) | ForEach-Object { Join-Path $_ 'EXCEL.EXE' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+'    if (-not $exe) { ULog '[ERREUR] Excel introuvable'; return }
+'    try { Start-Process -FilePath $exe; ULog '[TEST] Ouvrir et modifier une feuille, puis choisir FONCTIONNE ou BLOQUE.' }
+'    catch { ULog ('[ERREUR] Excel : '+$_.Exception.Message) }
+'}
+'$ui.ExcelOpen.Add_Click({ Open-ExcelForTest })
+'$ui.ExcelGood.Add_Click({
+'    Ask-InWindow 'Avez-vous ouvert Excel et pu modifier une feuille sans erreur de licence ? Confirmation valable 7 jours.' {
+'        Set-ExcelTest 'FONCTIONNE'
+'        Start-Scan
+'    }
+'})
+'$ui.ExcelBad.Add_Click({
+'    Ask-InWindow 'Confirmez-vous un blocage ou message rouge dans Excel ? Le signalement restera affiche meme si la licence est active.' {
+'        Set-ExcelTest 'BLOQUE'
+'        Start-Scan
+'    }
+'})
+'function Refresh-LocalMetrics {
+'    $counts=Get-LocalCounts
+'    $ui.LocalMetrics.Text=('Statistiques locales : '+$counts.Scans+' analyses | '+$counts.Blocks+' blocages | '+$counts.Support+' rapports. Aucun envoi automatique.')
+'}
+'$ui.SupportButton.Add_Click({
+'    if (-not [bool]$ui.ShareConsent.IsChecked) {
+'        $ui.SupportFeedback.Text='Consentement requis : aucune transmission ni preparation.'
+'        ULog '[SUPPORT] Cochez le consentement avant de preparer le fichier.'
+'        return
+'    }
+'    try {
+'        $report=Export-SupportReport ([string]$ui.IssueDescription.Text) ([string]$ui.CallbackPhone.Text)
+'        Open-SupportChat $report
+'        $ui.SupportFeedback.Text=('ZIP : '+$report.Zip+'. Dans WhatsApp, cliquez Joindre > Document, selectionnez le ZIP, puis Envoyer.')
+'        ULog ('[SUPPORT] Rapport cree : '+$report.Zip)
+'        Refresh-LocalMetrics
+'    } catch {
+'        $ui.SupportFeedback.Text=('Erreur : '+$_.Exception.Message)
+'        ULog ('[ERREUR] Preparation support : '+$_.Exception.Message)
+'    }
 '})
 'function Refresh-MonitorLabel {
 '    $m=Get-Monitor
@@ -857,6 +1060,7 @@ WScript.Quit 0
 '            $scanResult=Read-Json $script:ScanReportFile
 '            if ($scanResult) {
 '                Set-Details $scanResult
+'                Refresh-LocalMetrics
 '                # The full process log is retained in the same window.
 '            } else {
 '                $ui.TopStatus.Text='[ ERREUR DE CONTROLE ]'
@@ -980,6 +1184,8 @@ WScript.Quit 0
 '                Start-Process 'https://www.microsoft.com/microsoft-365/download-office'
 '            }
 '        }
+'        'OfficeSupport' { ULog '[SUPPORT] Utilisez le panneau Support pour preparer les logs.' }
+'        'OfficeTest' { Open-ExcelForTest }
 '        'OfficeAccount' {
 '            Ask-InWindow 'Ouvrir Word pour verifier Fichier > Compte et reconnecter un compte Microsoft autorise ?' {
 '                $loc=@(Office-Roots) | ForEach-Object { Join-Path $_ 'WINWORD.EXE' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
@@ -1001,6 +1207,8 @@ WScript.Quit 0
 '        }
 '    } catch { ULog ('[ATTENTION] Migration de la surveillance : ' + $_.Exception.Message) }
 '    Refresh-MonitorLabel
+'    $ui.InstallationIdLabel.Text=('Identifiant de support : '+(Get-InstallationId))
+'    Refresh-LocalMetrics
 '    if ($UseReport) {
 '        $prior=Read-Json $LastReport
 '        if ($prior) { Set-Details $prior; ULog '[MONITEUR] Une anomalie de licence a ete detectee.'; ULog '[INFO] Le resultat est celui du controle planifie.'; return }
