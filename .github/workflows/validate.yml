@@ -1,0 +1,65 @@
+name: Valider le moniteur
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validation-statique:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parser PowerShell et XAML
+        shell: powershell
+        run: |
+          $lines = Get-Content -LiteralPath '.\Moniteur-Office-Windows.vbs'
+          $inside = $false
+          $psLines = New-Object 'System.Collections.Generic.List[string]'
+          foreach ($line in $lines) {
+            if ($line -eq "'@@BEGIN_POWERSHELL") { $inside = $true; continue }
+            if ($line -eq "'@@END_POWERSHELL") { break }
+            if ($inside) {
+              if (-not $line.StartsWith("'")) { throw "Ligne embarquee mal formee : $line" }
+              $psLines.Add($line.Substring(1))
+            }
+          }
+          if ($psLines.Count -lt 200) { throw 'Moteur PowerShell incomplet' }
+          $source = [string]::Join("`r`n", $psLines.ToArray())
+          $tokens = $null
+          $errors = $null
+          [void][Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.ToString() }
+            throw "Le parseur PowerShell a signale $($errors.Count) erreur(s)"
+          }
+          $xaml = [regex]::Match($source, '(?s)<Window xmlns=.*?</Window>')
+          if (-not $xaml.Success) { throw 'XAML non trouve' }
+          [xml]$check = $xaml.Value
+          Write-Host ('Analyse statique OK : {0} lignes de PowerShell' -f $psLines.Count)
+
+      - name: Verifier la signature du manifeste et le SHA256 de la version publiee
+        shell: powershell
+        run: |
+          $m = Get-Content -LiteralPath 'updates/latest.json' -Raw | ConvertFrom-Json
+          $source = Get-Content -LiteralPath 'Moniteur-Office-Windows.vbs' -Raw
+          $mod = [regex]::Match($source, "\$PublisherModulus\s*=\s*'([^']+)'").Groups[1].Value
+          $exp = [regex]::Match($source, "\$PublisherExponent\s*=\s*'([^']+)'").Groups[1].Value
+          if (-not $mod -or -not $exp) { throw 'Cle publique absente' }
+          $rsa = New-Object Security.Cryptography.RSACryptoServiceProvider
+          try {
+            $param = New-Object Security.Cryptography.RSAParameters
+            $param.Modulus = [Convert]::FromBase64String($mod)
+            $param.Exponent = [Convert]::FromBase64String($exp)
+            $rsa.ImportParameters($param)
+            $payload = "$($m.version)`n$($m.url)`n$($m.sha256)`n$($m.notes)`n"
+            $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+            $sig = [Convert]::FromBase64String($m.signature)
+            if (-not $rsa.VerifyData($bytes, 'SHA256', $sig)) { throw 'Signature invalide' }
+          } finally { $rsa.Dispose() }
+          if ($m.url -notmatch '^https://raw\.githubusercontent\.com/anakimlyonnais/moniteur-office-windows/') { throw 'URL non reconnue' }
+          $download = Join-Path $env:TEMP 'moniteur-candidate.vbs'
+          Invoke-WebRequest -Uri $m.url -UseBasicParsing -OutFile $download -TimeoutSec 40
+          $hash = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $m.sha256.ToLowerInvariant()) { throw 'SHA256 du fichier publie incompatible avec le manifeste' }
+          Write-Host "Signature RSA et SHA256 valides pour V$($m.version)"
