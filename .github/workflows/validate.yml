@@ -43,8 +43,8 @@ jobs:
         run: |
           $m = Get-Content -LiteralPath 'updates/latest.json' -Raw | ConvertFrom-Json
           $source = Get-Content -LiteralPath 'Moniteur-Office-Windows.vbs' -Raw
-          $mod = [regex]::Match($source, "\$PublisherModulus\s*=\s*'([^']+)'").Groups[1].Value
-          $exp = [regex]::Match($source, "\$PublisherExponent\s*=\s*'([^']+)'").Groups[1].Value
+          $mod = [regex]::Match($source, '\$PublisherModulus\s*=\s*''([^'']+)''').Groups[1].Value
+          $exp = [regex]::Match($source, '\$PublisherExponent\s*=\s*''([^'']+)''').Groups[1].Value
           if (-not $mod -or -not $exp) { throw 'Cle publique absente' }
           $rsa = New-Object Security.Cryptography.RSACryptoServiceProvider
           try {
