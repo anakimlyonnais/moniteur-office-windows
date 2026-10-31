@@ -291,8 +291,14 @@ WScript.Quit 0
 '    }
 '}
 'function Open-SupportChat($Report) {
-'    $message='Moniteur Office + Windows'+"\n"+'ID : '+$Report.Id+"\n"+'Version : '+$AppVersion+"\n"+'Rapport ZIP prepare : '+[IO.Path]::GetFileName($Report.Zip)+"\n"+'Je joins le fichier manuellement.'
-'    if ($Report.Caller) { $message+="\n"+'Mon WhatsApp pour rappel : '+$Report.Caller }
+'    $message=@(
+'        'Support Moniteur Office + Windows',
+'        'ID : '+$Report.Id,
+'        'Version : '+$AppVersion,
+'        'Rapport ZIP prepare : '+[IO.Path]::GetFileName($Report.Zip),
+'        'Je joins le document manuellement.'
+'    ) -join [Environment]::NewLine
+'    if ($Report.Caller) { $message += [Environment]::NewLine + 'Mon WhatsApp pour rappel : ' + $Report.Caller }
 '    $url='https://wa.me/'+$SupportPhone+'?text='+[uri]::EscapeDataString($message)
 '    Start-Process -FilePath $url
 '    Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $Report.Zip)
