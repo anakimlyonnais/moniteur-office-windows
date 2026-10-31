@@ -208,7 +208,94 @@ WScript.Quit 0
 'function Set-ExcelTest([string]$Status) {
 '    if ($Status -notin @('BLOQUE','FONCTIONNE')) { throw 'Etat invalide' }
 '    Save-Json $ExcelTestFile ([pscustomobject]@{Status=$Status;Timestamp=(Get-Date).ToString('o')})
+'    if ($Status -eq 'BLOQUE') { Record-LocalEvent 'excel_bloque' }
 '    Add-History ('Test Excel par utilisateur: '+$Status)
+'}
+'function Record-LocalEvent([string]$Event) {
+'    if ($Event -notin @('scan','excel_bloque','rapport_support')) { return }
+'    try {
+'        if (-not (Test-Path -LiteralPath $MetricsPath)) { [void](New-Item -ItemType Directory -Path $MetricsPath -Force) }
+'        $p=Join-Path $MetricsPath ([guid]::NewGuid().ToString('N')+'.json')
+'        [pscustomobject]@{Event=$Event;Version=$AppVersion;Timestamp=(Get-Date).ToUniversalTime().ToString('o')} |
+'            ConvertTo-Json -Compress | Set-Content -LiteralPath $p -Encoding UTF8
+'    } catch { }
+'}
+'function Get-LocalCounts {
+'    $c=@{scan=0;excel_bloque=0;rapport_support=0}
+'    try {
+'        Get-ChildItem -LiteralPath $MetricsPath -Filter '*.json' -File -ErrorAction Stop | ForEach-Object {
+'            try {
+'                $o=Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+'                if ($c.ContainsKey([string]$o.Event)) { $c[[string]$o.Event]++ }
+'            } catch { }
+'        }
+'    } catch { }
+'    return [pscustomobject]@{Scans=$c.scan;Blocks=$c.excel_bloque;Support=$c.rapport_support}
+'}
+'function Redact-Log([string]$Text) {
+'    $t=[string]$Text
+'    if ($env:USERNAME) { $t=$t.Replace($env:USERNAME,'[utilisateur]') }
+'    $t=[regex]::Replace($t,'(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}','[courriel masque]')
+'    $t=[regex]::Replace($t,'(?i)[A-Z0-9]{5}(?:-[A-Z0-9]{5}){4}','[cle masquee]')
+'    return $t
+'}
+'function Export-SupportReport([string]$Issue,[string]$Caller) {
+'    $r=Read-Json $LastReport
+'    if (-not $r) { throw 'Diagnostic manquant. Utilisez REFAIRE LE CONTROLE.' }
+'    $id=Get-InstallationId
+'    $desktop=[Environment]::GetFolderPath('DesktopDirectory')
+'    if (-not $desktop -or -not (Test-Path -LiteralPath $desktop)) { $desktop=$Root }
+'    $stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
+'    $zip=Join-Path $desktop ('Rapport-'+$id+'-'+$stamp+'.zip')
+'    $temp=Join-Path $Root ('rapport-'+[guid]::NewGuid().ToString('N'))
+'    [void](New-Item -Path $temp -ItemType Directory -Force)
+'    try {
+'        $issue=Redact-Log $Issue
+'        if ($issue.Length -gt 320) { $issue=$issue.Substring(0,320) }
+'        $caller=[regex]::Replace($Caller,'[^0-9+]','')
+'        if ($caller.Length -gt 20) { $caller='' }
+'        # Data minimization: no full license keys, tenant IDs, raw Office command output, or filenames.
+'        [pscustomobject]@{
+'            Schema='support-v1';Id=$id;Created=(Get-Date).ToString('o');Version=$AppVersion
+'            Windows=[pscustomobject]@{ Edition=$r.Windows.Edition;Build=$r.Windows.Build;LicenseState=$r.Windows.State;Channel=$r.Windows.Channel;PartialKey=$r.Windows.Key;ErrorCode=$r.Windows.Reason }
+'            Office=[pscustomobject]@{ Edition=$r.Office.Edition;Version=$r.Office.Version;LicenseState=$r.Office.State;LicenseType=$r.Office.Type;PartialKey=$r.Office.Key;Functionality=$r.Office.FunctionalState;LastTest=$r.Office.FunctionalDate }
+'            UserReport=$issue;CallbackWhatsApp=$caller
+'        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $temp 'diagnostic.json') -Encoding UTF8
+'        if (Test-Path -LiteralPath $History) {
+'            @(Get-Content -LiteralPath $History -Tail 120 -ErrorAction SilentlyContinue | ForEach-Object { Redact-Log ([string]$_) }) |
+'                Set-Content -LiteralPath (Join-Path $temp 'historique-expurge.txt') -Encoding UTF8
+'        }
+'        $events=@()
+'        try {
+'            $items=Get-WinEvent -FilterHashtable @{LogName='Application';StartTime=(Get-Date).AddDays(-7);Level=2} -MaxEvents 150 -ErrorAction Stop
+'            foreach ($e in $items) {
+'                if ($e.ProviderName -match '(?i)Office|ClickToRun|Application Error' -or $e.Message -match '(?i)EXCEL\.EXE|WINWORD\.EXE') {
+'                    $events += [pscustomobject]@{When=$e.TimeCreated.ToString('o');Provider=$e.ProviderName;Id=$e.Id}
+'                }
+'            }
+'        } catch { }
+'        $events | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $temp 'evenements-office.json') -Encoding UTF8
+'        $blocks=@()
+'        try {
+'            $ci=Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-CodeIntegrity/Operational';Id=3076,3077;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 50 -ErrorAction Stop
+'            $blocks=@($ci | ForEach-Object { [pscustomobject]@{When=$_.TimeCreated.ToString('o');Id=$_.Id} })
+'        } catch { }
+'        $blocks | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $temp 'smart-app-control.json') -Encoding UTF8
+'        @('Rapport local pour support. Aucun televersement ni envoi automatique.', 'Verifier les fichiers avant de joindre ce ZIP a WhatsApp.', 'Ne jamais partager un mot de passe ni une cle de licence complete.') |
+'            Set-Content -LiteralPath (Join-Path $temp 'A-LIRE.txt') -Encoding UTF8
+'        Compress-Archive -Path (Join-Path $temp '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+'        Record-LocalEvent 'rapport_support'
+'        return [pscustomobject]@{Zip=$zip;Id=$id;Caller=$caller}
+'    } finally {
+'        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+'    }
+'}
+'function Open-SupportChat($Report) {
+'    $message='Moniteur Office + Windows'+"\n"+'ID : '+$Report.Id+"\n"+'Version : '+$AppVersion+"\n"+'Rapport ZIP prepare : '+[IO.Path]::GetFileName($Report.Zip)+"\n"+'Je joins le fichier manuellement.'
+'    if ($Report.Caller) { $message+="\n"+'Mon WhatsApp pour rappel : '+$Report.Caller }
+'    $url='https://wa.me/'+$SupportPhone+'?text='+[uri]::EscapeDataString($message)
+'    Start-Process -FilePath $url
+'    Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $Report.Zip)
 '}
 'function Get-Status([int]$Code) {
 '    switch ($Code) { 1 {'ACTIVE'} 0 {'INACTIVE'} 5 {'INACTIVE'} 2 {'ATTENTION'} 3 {'ATTENTION'} 4 {'ATTENTION'} 6 {'ATTENTION'} default {'INCONNU'} }
@@ -475,6 +562,7 @@ WScript.Quit 0
 '    $result = [pscustomobject]@{ Timestamp=(Get-Date).ToString('o'); Windows=$w; Office=$o; OpenOffice=$open; Advice=$advice; Update=$update }
 '    if ($ReportFile) { Save-Json $ReportFile $result }
 '    Save-Json $LastReport $result
+'    Record-LocalEvent 'scan'
 '    Add-History ('Controle : Windows={0} Office={1} Action={2}' -f $w.State, $o.State, $advice.Action)
 '    Step 'Diagnostic termine. Aucune modification de licence effectuee.'
 '    return $result
@@ -693,6 +781,20 @@ WScript.Quit 0
 '     </StackPanel>
 '    </StackPanel>
 '   </Border>
+'   <Border Background="#121C22" BorderBrush="#3B6474" BorderThickness="1" CornerRadius="7" Padding="15,11" Margin="0,0,0,12">
+'    <StackPanel>
+'     <TextBlock Text="&gt; SUPPORT WHATSAPP / RAPPORT D'ANALYSE" FontFamily="Consolas" FontWeight="Bold" Foreground="#C9E9F5" FontSize="13"/>
+'     <TextBlock x:Name="InstallationIdLabel" Text="Identifiant du poste..." Foreground="#9FC6D0" FontSize="12" Margin="0,7,0,8"/>
+'     <TextBlock Text="Votre numero WhatsApp pour rappel (facultatif)" Foreground="#CED9E0" FontSize="12"/>
+'     <TextBox x:Name="CallbackPhone" MaxLength="20" Height="29" Margin="0,3,0,7" Background="#0B1015" Foreground="#EDF5F5" BorderBrush="#456573" Padding="7,4"/>
+'     <TextBlock Text="Description du probleme (facultative; aucune donnee personnelle)" Foreground="#CED9E0" FontSize="12"/>
+'     <TextBox x:Name="IssueDescription" MaxLength="320" Height="46" AcceptsReturn="True" TextWrapping="Wrap" Margin="0,3,0,8" Background="#0B1015" Foreground="#EDF5F5" BorderBrush="#456573" Padding="7,4"/>
+'     <CheckBox x:Name="ShareConsent" Content="Je consens a preparer un ZIP pour le partager moi-meme dans WhatsApp." Margin="0,0,0,8"/>
+'     <Button x:Name="SupportButton" Content="PR&#201;PARER RAPPORT ET OUVRIR WHATSAPP" HorizontalAlignment="Left"/>
+'     <TextBlock x:Name="SupportFeedback" Text="Le ZIP n'est pas joint ou envoye automatiquement; choisissez Joindre dans WhatsApp." Foreground="#98BACA" TextWrapping="Wrap" FontSize="12" Margin="0,8,0,4"/>
+'     <TextBlock x:Name="LocalMetrics" Text="Statistiques locales uniquement; aucune telemetrie automatique." Foreground="#83B4B8" FontSize="12" Margin="0,4,0,0"/>
+'    </StackPanel>
+'   </Border>
 '   <Border Background="#131B22" BorderBrush="#315743" BorderThickness="1" CornerRadius="7" Padding="15,11" Margin="0,0,0,12">
 '    <StackPanel>
 '     <TextBlock Text="&gt; MISES A JOUR SIGNEES / CONFIRMATION REQUISE" Foreground="#CDEFE0" FontFamily="Consolas" FontWeight="Bold" FontSize="13" Margin="0,0,0,8"/>
@@ -733,7 +835,7 @@ WScript.Quit 0
 ''@
 '$reader = New-Object System.Xml.XmlNodeReader $xml
 '$window = [System.Windows.Markup.XamlReader]::Load($reader)
-'$names = @('TopStatus','TopTime','WinBadge','OfficeBadge','WinFields','OfficeFields','AdviceText','ActionButton','RefreshButton','ConfirmPanel','ConfirmText','YesButton','NoButton','LogBox','EnableMonitor','Weekly','Daily','MonitorLabel','SaveMonitor','UpdateStatus','UpdateButton','UpdateLater','ExcelTestStatus','ExcelOpen','ExcelGood','ExcelBad')
+'$names = @('TopStatus','TopTime','WinBadge','OfficeBadge','WinFields','OfficeFields','AdviceText','ActionButton','RefreshButton','ConfirmPanel','ConfirmText','YesButton','NoButton','LogBox','EnableMonitor','Weekly','Daily','MonitorLabel','SaveMonitor','UpdateStatus','UpdateButton','UpdateLater','ExcelTestStatus','ExcelOpen','ExcelGood','ExcelBad','InstallationIdLabel','CallbackPhone','IssueDescription','ShareConsent','SupportButton','SupportFeedback','LocalMetrics')
 '$ui = @{}
 'foreach ($n in $names) { $ui[$n] = $window.FindName($n) }
 '$script:ScanProc = $null
@@ -872,6 +974,27 @@ WScript.Quit 0
 '        Start-Scan
 '    }
 '})
+'function Refresh-LocalMetrics {
+'    $counts=Get-LocalCounts
+'    $ui.LocalMetrics.Text=('Statistiques locales : '+$counts.Scans+' analyses | '+$counts.Blocks+' blocages | '+$counts.Support+' rapports. Aucun envoi automatique.')
+'}
+'$ui.SupportButton.Add_Click({
+'    if (-not [bool]$ui.ShareConsent.IsChecked) {
+'        $ui.SupportFeedback.Text='Consentement requis : aucune transmission ni preparation.'
+'        ULog '[SUPPORT] Cochez le consentement avant de preparer le fichier.'
+'        return
+'    }
+'    try {
+'        $report=Export-SupportReport ([string]$ui.IssueDescription.Text) ([string]$ui.CallbackPhone.Text)
+'        Open-SupportChat $report
+'        $ui.SupportFeedback.Text=('ZIP : '+$report.Zip+'. Dans WhatsApp, cliquez Joindre > Document, selectionnez le ZIP, puis Envoyer.')
+'        ULog ('[SUPPORT] Rapport cree : '+$report.Zip)
+'        Refresh-LocalMetrics
+'    } catch {
+'        $ui.SupportFeedback.Text=('Erreur : '+$_.Exception.Message)
+'        ULog ('[ERREUR] Preparation support : '+$_.Exception.Message)
+'    }
+'})
 'function Refresh-MonitorLabel {
 '    $m=Get-Monitor
 '    $ui.EnableMonitor.IsChecked=[bool]$m.Enabled
@@ -931,6 +1054,7 @@ WScript.Quit 0
 '            $scanResult=Read-Json $script:ScanReportFile
 '            if ($scanResult) {
 '                Set-Details $scanResult
+'                Refresh-LocalMetrics
 '                # The full process log is retained in the same window.
 '            } else {
 '                $ui.TopStatus.Text='[ ERREUR DE CONTROLE ]'
@@ -1077,6 +1201,8 @@ WScript.Quit 0
 '        }
 '    } catch { ULog ('[ATTENTION] Migration de la surveillance : ' + $_.Exception.Message) }
 '    Refresh-MonitorLabel
+'    $ui.InstallationIdLabel.Text=('Identifiant de support : '+(Get-InstallationId))
+'    Refresh-LocalMetrics
 '    if ($UseReport) {
 '        $prior=Read-Json $LastReport
 '        if ($prior) { Set-Details $prior; ULog '[MONITEUR] Une anomalie de licence a ete detectee.'; ULog '[INFO] Le resultat est celui du controle planifie.'; return }
